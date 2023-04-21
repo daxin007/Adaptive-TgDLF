@@ -5,4 +5,4 @@
 #### 4. grid_data_v2.py # script for reading and preprocessing the load data for load forecasting experiments
 #### 5. grid_configuration.py # script for configurations of load forecasting experiments
 #### 6. utils.py # some tools that help analysing or training
-#### 7. tst # 
+#### 7. tst # the Transformer model for load forecasting
