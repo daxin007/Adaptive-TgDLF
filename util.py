@@ -10,12 +10,9 @@ def list_to_csv(li):
     return result
 
 
-def Regeneralize (result, mean, std): # 输入的result是个array
-    #row_size = result.shape[0]
+def Regeneralize (result, mean, std): # regeneralize the result to real scale
     mean_matrix = mean
     std_matrix = std
-    #mean_matrix = np.tile(mean_matrix, (row_size, 1))
-    #std_matrix = np.tile(std_matrix, (row_size, 1))
     result_real_scale = (result * std_matrix) + mean_matrix
     return result_real_scale
 
@@ -44,7 +41,7 @@ def shrink(data, size):
         i += size
 
 
-class Record:
+class Record: # save the logs of training
     
     def __init__(self):
         self.data = []
