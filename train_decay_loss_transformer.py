@@ -1,5 +1,4 @@
 import numpy as np
-from grid_LSTM import netLSTM, netLSTM_full
 from grid_data_v2 import TextDataset
 import grid_data_v2 as grid_data
 from grid_configuration import config
