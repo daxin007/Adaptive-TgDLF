@@ -1,4 +1,6 @@
+from enn import *
 import numpy as np
+from grid_LSTM import netLSTM, netLSTM_full
 from grid_data_v2 import TextDataset
 import grid_data_v2 as grid_data
 from grid_configuration import config
@@ -38,9 +40,9 @@ d_input = 9  # From dataset
 d_output = 1  # From dataset
 
 # Config
+# sns.set()
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"Using device {device}")
-
 
 def ave_ratio (data_origin, use_filter=True, test_len=0): # extract the dimensionless trend from the source data 
     mean_ratio_all = None
@@ -85,9 +87,9 @@ def ave_ratio (data_origin, use_filter=True, test_len=0): # extract the dimensio
             mean_ratio_all = np.vstack((mean_ratio_all, mean_ratio))
     return load_raw_array,mean_ratio_all
 
-def process_data(text,train_len=4704,DT=False,transfer=False,m_ex=None): # get the local fluctutaion for training Transformer
-    tmp = text.train_data_input_all_list[0][:train_len]
-    tmp_out = text.train_data_output_all_list[0][:train_len]
+def process_online_data(text,train_len=4704,DT=False,transfer=False,m_ex=None): # get the local fluctutaion for training Transformer
+    tmp = text.train_data_input_all_list[0][train_len+4056:2*train_len+4056]
+    tmp_out = text.train_data_output_all_list[0][train_len+4056:2*train_len+4056]
     m = None
     m_out = None
     if DT:
@@ -137,7 +139,9 @@ def process_data(text,train_len=4704,DT=False,transfer=False,m_ex=None): # get t
                                 num_workers=config.num_workers, drop_last=config.drop_last)
     return textLoader, m, m_out
 
-def run(sourceLoader,textLoader,weather_error_train=0.05,weather_error_test=0.05,transfer=False, mode=0): # training process
+def run(sourceLoader,testLoader1,onlineLoader1,testLoader2,onlineLoader2,testLoader3,
+        weather_error_train=0.05,weather_error_test=0.05,transfer=False, mode=0): # training process
+
     model = Transformer(d_input, d_model, d_output, 
                         q, v, h, N, attention_size=attention_size, 
                         dropout=dropout, chunk_mode=chunk_mode, pe=pe)
@@ -145,131 +149,136 @@ def run(sourceLoader,textLoader,weather_error_train=0.05,weather_error_test=0.05
     criterion = torch.nn.MSELoss()
     lr_tmp = 1e-2
     opt = torch.optim.Adam(model.parameters(), lr=lr_tmp)
-    source_result=[]
-    target_result=[]
-    loss_curve = []
-    # training of source data
-    if transfer:
-        for epoch in range(config.epoch):
-    #     for epoch in range(0):
-            for i, data in enumerate(sourceLoader):
-                input_, target = data
-                input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_train)
+    test1_result=[]
+    test2_result=[]
+    test3_result=[]
+    test_set = [testLoader1,testLoader2,testLoader3]
+    test_results = [test1_result,test2_result,test3_result]
+    # first stage of online learning
+    for epoch in range(config.epoch): # training
+        for i, data in enumerate(sourceLoader):
+            input_, target = data
+            input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_train)
 #                 input_[:, :, 1:5] = 0
-                input_, target = map(Variable, (input_.float(), target.float()))
-                target = target[:, -config.predict_len:, :]
-                target = target.reshape(-1, config.output_dim)
-                input_ = input_.cuda()
-                target = target.cuda()
-                pred = model(input_)
-                pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
-                loss = criterion(pred, target)
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-        source_result.append(round(loss.item(),5))
-        config.epoch = int(config.epoch/2)
-        lr_tmp = 1e-3
-        # three transfer strategies
-        if mode == 0:
-            opt = torch.optim.Adam(model.parameters(), lr=lr_tmp)
-        elif mode == 1:
-            for name,paras in model.named_parameters():
-                if "layers" in name or "_embedding" in name:
-                    paras.requires_grad = False
-            opt = torch.optim.Adam(filter(lambda p:p.requires_grad,model.parameters()),lr=lr_tmp)
-        elif mode == 2:
-            for name,paras in model.named_parameters():
-                if "_linear" in name:
-                    paras.requires_grad = False
-            opt = torch.optim.Adam(filter(lambda p:p.requires_grad,model.parameters()),lr=lr_tmp)
-    # training of target data
+            input_, target = map(Variable, (input_.float(), target.float()))
+            target = target[:, -config.predict_len:, :]
+            target = target.reshape(-1, config.output_dim)
+            input_ = input_.cuda()
+            target = target.cuda()
+            pred = model(input_)
+            pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
+            loss = criterion(pred, target)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+    for j in range(3): # testing, there are 3 batchs in total
+        for i, data in enumerate(test_set[j]):
+            input_, target = data
+            input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_train)
+            input_, target = map(Variable, (input_.float(), target.float()))
+            target = target[:, -config.predict_len:, :]
+            target = target.reshape(-1, config.output_dim)
+            input_ = input_.cuda()
+            target = target.cuda()
+            pred = model(input_)
+            pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
+            loss = criterion(pred, target)
+            test_results[j].append(round(loss.item(),5))
+    lr_tmp = 1e-3
+    opt = torch.optim.Adam(model.parameters(), lr=lr_tmp)
+    # second stage of online learning
     for epoch in range(config.epoch):
-        for i, data in enumerate(textLoader):
-#             if i==0:
-#                 continue
-            if i<=1:
-                input_, target = data
-                input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_train)
-#                 input_[:, :, 1:5] = 0
-                input_, target = map(Variable, (input_.float(), target.float()))
-                target = target[:, -config.predict_len:, :]
-#                 input_ = input_[:32]
-#                 target = target[:32]
-                target = target.reshape(-1, config.output_dim)
-#                 input_=input_.transpose(1,2)
-                input_ = input_.cuda()
-                target = target.cuda()
-                pred = model(input_)
-                pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
-                loss = criterion(pred, target)
-#                 print("train loss:",loss)
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-                if len(target_result)==0:
-                    target_result.append(round(loss.item(),5))
-                elif epoch==config.epoch-1 and i==1:
-                    target_result.append(round(loss.item(),5))                
-            else:
-                input_, target = data
-                input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_test)
-#                 input_[:, :, 1:5] = 0
-                input_, target = map(Variable, (input_.float(), target.float()))
-                target = target[:, -config.predict_len:, :]
-#                 print(target.shape)
-                target = target.reshape(-1, config.output_dim)
-#                 input_=input_.transpose(1,2)
-                input_ = input_.cuda()
-                target = target.cuda()
-                pred = model(input_)
-                pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
-                loss = criterion(pred, target)
-#                 print("test loss:",loss)
-                if epoch==config.epoch-1:
-                    target_result.append(round(loss.item(),5))
-                if epoch % 10 ==0:
-                    loss_curve.append(round(loss.item(),5))
-    return source_result,target_result,loss_curve
+        for i, data in enumerate(onlineLoader1):
+            input_, target = data
+            input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_train)
+            input_, target = map(Variable, (input_.float(), target.float()))
+            target = target[:, -config.predict_len:, :]
+            target = target.reshape(-1, config.output_dim)
+            input_ = input_.cuda()
+            target = target.cuda()
+            pred = model(input_)
+            pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
+            loss = criterion(pred, target)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+    for j in range(3):
+        for i, data in enumerate(test_set[j]):
+            input_, target = data
+            input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_train)
+            input_, target = map(Variable, (input_.float(), target.float()))
+            target = target[:, -config.predict_len:, :]
+            target = target.reshape(-1, config.output_dim)
+            input_ = input_.cuda()
+            target = target.cuda()
+            pred = model(input_)
+            pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
+            loss = criterion(pred, target)
+            test_results[j].append(round(loss.item(),5))
+    # third stage of online learning
+    for epoch in range(config.epoch):
+        for i, data in enumerate(onlineLoader2):
+            input_, target = data
+            input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_train)
+            input_, target = map(Variable, (input_.float(), target.float()))
+            target = target[:, -config.predict_len:, :]
+            target = target.reshape(-1, config.output_dim)
+            input_ = input_.cuda()
+            target = target.cuda()
+            pred = model(input_)
+            pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
+            loss = criterion(pred, target)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+    for j in range(3):
+        for i, data in enumerate(test_set[j]):
+            input_, target = data
+            input_[:, :, 1:5] = input_[:, :, 1:5] * (1 + np.random.randn() * weather_error_train)
+            input_, target = map(Variable, (input_.float(), target.float()))
+            target = target[:, -config.predict_len:, :]
+            target = target.reshape(-1, config.output_dim)
+            input_ = input_.cuda()
+            target = target.cuda()
+            pred = model(input_)
+            pred = pred[:,-config.predict_len:, :].reshape(-1, config.output_dim)
+            loss = criterion(pred, target)
+            test_results[j].append(round(loss.item(),5))
+    return test1_result,test2_result,test3_result
 
 def exper(transfer=False, dt=False, mode=0, weather_error_test=0.05): # 10 independent experiments
     seeds = [i for i in range(10)]
     nums = 10
     weather_error_train = 0.05
-    source_result = []
-    target_result = []
-    loss_result = []
+    test1_result = []
+    test2_result = []
+    test3_result = []
+    config.train_ID=[9]
+    config.batch_size=64
+    config.epoch=10
+    source = TextDataset(config)
+    sourceLoader,m2,m2_out = process_data(source,DT=dt,transfer=transfer)
+    testLoader1,_,_ = process_test_data(source,DT=dt,transfer=transfer,m_ex=(m2,m2_out))
+    onlineLoader1,_,_ = process_data(source,start=8760,end=13464,DT=dt,transfer=transfer,m_ex=(m2,m2_out))
+    testLoader2,_,_ = process_test_data(source,start=13464,end=17520,DT=dt,transfer=transfer,m_ex=(m2,m2_out))
+    onlineLoader2,_,_ = process_data(source,start=17520,end=22224,DT=dt,transfer=transfer,m_ex=(m2,m2_out))
+    testLoader3,_,_ = process_test_data(source,start=22224,end=26280,DT=dt,transfer=transfer,m_ex=(m2,m2_out))
     for i in range(nums):
         seed = seeds[i]
         torch.random.manual_seed(seed)
         np.random.seed(seed)
         torch.cuda.manual_seed_all(seed)
         torch.cuda.set_device(config.deviceID)
-        # get the source data
-        config.train_ID=[8]
-        source = TextDataset(config)
-        sourceLoader = DataLoader(source, batch_size=config.batch_size, shuffle=False,
-                                num_workers=config.num_workers, drop_last=config.drop_last)
-        sourceLoader,m2,m2_out = process_data(source,DT=dt,transfer=transfer)
-        # get the target data
-        config.train_ID=[9]
-        config.batch_size=64
-        config.epoch=100
-        text = TextDataset(config)
-        if not transfer:
-            textLoader,m1,m1_out = process_data(text,DT=dt,transfer=transfer)
-        else:
-            textLoader,m1,m1_out = process_data(text,DT=dt,transfer=transfer,m_ex=(m2,m2_out))
-        s,t,l=run(sourceLoader,textLoader,weather_error_train,weather_error_test,transfer,mode)
-        if len(s)!=0: source_result.append(s)
-        if len(t)!=0: target_result.append(t)
-        if len(l)!=0: loss_result.append(l)
-    return source_result,target_result,loss_result
+        s,t,l=run(sourceLoader,testLoader1,onlineLoader1,testLoader2,onlineLoader2,testLoader3,weather_error_train,weather_error_test,transfer,mode)
+        if len(s)!=0: test1_result.append(s)
+        if len(t)!=0: test2_result.append(t)
+        if len(l)!=0: test3_result.append(l)
+    return test1_result,test2_result,test3_result
 
-def final_run(dt = False): # experiments under diffenrent three transfer strategies and different weather noise rate
-    poss_trans = [False,True]
-    poss_mode = [0,1,2]
-    poss_we = [0.05,0.1,0.2,0.3]
+def final_run(dt = False): # final experiments
+    poss_trans = [True]
+    poss_mode = [0]
+    poss_we = [0.05]
     result = {}
     for trans in poss_trans:
 #         print(trans)
@@ -290,6 +299,3 @@ def final_run(dt = False): # experiments under diffenrent three transfer strateg
 
 if __name__ == '__main__':
     result_DT = final_run(dt = True)
-    f = open("new_result/fs_mtg_transdt_128.txt",'w')
-    f.write(str(result_DT))
-    f.close()
